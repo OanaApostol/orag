@@ -8,6 +8,31 @@ from functools import lru_cache
 class Settings:
     """Application settings loaded from YAML configuration file."""
     
+    # Mapping from YAML path to attribute name
+    CONFIG_MAPPING = {
+        ('openai', 'api_key'): 'openai_api_key',
+        ('pinecone', 'api_key'): 'pinecone_api_key',
+        ('pinecone', 'index_name'): 'pinecone_index_name',
+        ('embedding', 'model'): 'embedding_model',
+        ('embedding', 'dimension'): 'embedding_dimension',
+        ('llm', 'model'): 'llm_model',
+        ('llm', 'temperature'): 'llm_temperature',
+        ('llm', 'max_tokens'): 'max_tokens',
+        ('retrieval', 'top_k_results'): 'top_k_results',
+        ('retrieval', 'chunk_size'): 'chunk_size',
+        ('retrieval', 'chunk_overlap'): 'chunk_overlap',
+        ('chunking', 'use_semantic_chunking'): 'use_semantic_chunking',
+        ('chunking', 'semantic_threshold_percentile'): 'semantic_threshold_percentile',
+        ('chunking', 'min_chunk_quality_score'): 'min_chunk_quality_score',
+        ('chunking', 'enable_content_aware_chunking'): 'enable_content_aware_chunking',
+        ('chunking', 'dynamic_chunk_sizing'): 'dynamic_chunk_sizing',
+    }
+    
+    # Default values for optional keys
+    DEFAULTS = {
+        ('pinecone', 'index_name'): 'typeform-help-center',
+    }
+    
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize settings from YAML file."""
         self.config_path = Path(config_path)
@@ -21,37 +46,24 @@ class Settings:
         with open(self.config_path, 'r') as file:
             config = yaml.safe_load(file)
         
-        # OpenAI Configuration
-        self.openai_api_key = config['openai']['api_key']
+        if not config:
+            raise ValueError(f"Configuration file is empty: {self.config_path}")
         
-        # Pinecone Configuration
-        self.pinecone_api_key = config['pinecone']['api_key']
-        self.pinecone_index_name = config['pinecone'].get('index_name', 'typeform-help-center')
-        
-        # Embedding Model Configuration
-        self.embedding_model = config['embedding']['model']
-        self.embedding_dimension = config['embedding']['dimension']
-        
-        # LLM Configuration
-        self.llm_model = config['llm']['model']
-        self.llm_temperature = config['llm']['temperature']
-        self.max_tokens = config['llm']['max_tokens']
-        
-        # Retrieval Configuration
-        self.top_k_results = config['retrieval']['top_k_results']
-        self.chunk_size = config['retrieval']['chunk_size']
-        self.chunk_overlap = config['retrieval']['chunk_overlap']
-        
-        # Enhanced Chunking Configuration
-        self.use_semantic_chunking = config['chunking']['use_semantic_chunking']
-        self.semantic_threshold_percentile = config['chunking']['semantic_threshold_percentile']
-        self.min_chunk_quality_score = config['chunking']['min_chunk_quality_score']
-        self.enable_content_aware_chunking = config['chunking']['enable_content_aware_chunking']
-        self.dynamic_chunk_sizing = config['chunking']['dynamic_chunk_sizing']
+        # Load all configured attributes
+        for (section, key), attr_name in self.CONFIG_MAPPING.items():
+            if section not in config:
+                raise KeyError(f"Missing configuration section: [{section}]")
+            
+            default = self.DEFAULTS.get((section, key))
+            value = config[section].get(key, default)
+            
+            if value is None:
+                raise KeyError(f"Missing required key: [{section}][{key}]")
+            
+            setattr(self, attr_name, value)
 
 
 @lru_cache()
-def get_settings() -> Settings:
+def get_settings(config_path: str = "config.yaml") -> Settings:
     """Get cached settings instance."""
-    return Settings()
-
+    return Settings(config_path)

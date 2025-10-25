@@ -13,22 +13,37 @@ class VectorStore:
     Manages vector embeddings and semantic search using Pinecone.
     
     Design Decisions:
-    - Uses OpenAI's text-embedding-3-small for cost-effective, high-quality embeddings
+    - Uses OpenAI's text-embedding-3-large for cost-effective, high-quality embeddings
     - Pinecone serverless for scalable vector storage
     - Batched embedding generation for efficiency
     - Metadata filtering support for better retrieval
     """
     
-    def __init__(self):
+    EMBEDDING_BATCH_SIZE = 100
+    VECTOR_BATCH_SIZE = 100
+    PINECONE_REGION = 'us-east-1'
+    PINECONE_CLOUD = 'aws'
+    INIT_WAIT_TIME = 1  # seconds
+    
+    # Default metadata values for search results
+    METADATA_DEFAULTS = {
+        'title': '',
+        'url': '',
+        'article_id': '',
+        'chunk_index': '',
+        'chunk_type': 'general',
+        'topics': '',
+        'difficulty': 'beginner',
+        'quality_score': '0.0',
+        'has_code': 'false',
+        'has_steps': 'false'
+    }
+    
+    def __init__(self, settings=None):
         """Initialize vector store with Pinecone and OpenAI clients."""
-        self.settings = get_settings()
-        
-        # Initialize Pinecone
+        self.settings = settings or get_settings()
         self.pc = Pinecone(api_key=self.settings.pinecone_api_key)
-        
-        # Initialize OpenAI for embeddings
         self.openai_client = OpenAI(api_key=self.settings.openai_api_key)
-        
         self.index = None
     
     def initialize_index(self, force_recreate: bool = False):
@@ -39,38 +54,37 @@ class VectorStore:
             force_recreate: If True, delete and recreate the index
         """
         index_name = self.settings.pinecone_index_name
+        existing_indexes = self._get_existing_indexes()
         
-        try:
-            # Check if index exists
-            existing_indexes = [idx.name for idx in self.pc.list_indexes()]
-            
-            if force_recreate and index_name in existing_indexes:
-                print(f"Deleting existing index: {index_name}")
-                self.pc.delete_index(index_name)
-                existing_indexes.remove(index_name)
-                time.sleep(1)  # Wait for deletion to complete
-        except Exception as e:
-            print(f"Warning: Could not list existing indexes: {e}")
-            existing_indexes = []
+        if force_recreate and index_name in existing_indexes:
+            print(f"Deleting existing index: {index_name}")
+            self.pc.delete_index(index_name)
+            time.sleep(self.INIT_WAIT_TIME)
         
-        # Create index if it doesn't exist
         if index_name not in existing_indexes:
-            print(f"Creating new index: {index_name}")
-            self.pc.create_index(
-                name=index_name,
-                dimension=self.settings.embedding_dimension,
-                metric='cosine',
-                spec=ServerlessSpec(
-                    cloud='aws',
-                    region='us-east-1'
-                )
-            )
-            # Wait for index to be ready
-            time.sleep(1)
+            self._create_index(index_name)
         
-        # Connect to index
         self.index = self.pc.Index(index_name)
         print(f"Connected to index: {index_name}")
+    
+    def _get_existing_indexes(self) -> List[str]:
+        """Get list of existing index names, safely handling errors."""
+        try:
+            return [idx.name for idx in self.pc.list_indexes()]
+        except Exception as e:
+            print(f"Warning: Could not list existing indexes: {e}")
+            return []
+    
+    def _create_index(self, index_name: str):
+        """Create a new Pinecone index."""
+        print(f"Creating new index: {index_name}")
+        self.pc.create_index(
+            name=index_name,
+            dimension=self.settings.embedding_dimension,
+            metric='cosine',
+            spec=ServerlessSpec(cloud=self.PINECONE_CLOUD, region=self.PINECONE_REGION)
+        )
+        time.sleep(self.INIT_WAIT_TIME)
     
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -83,20 +97,13 @@ class VectorStore:
             List of embedding vectors
         """
         embeddings = []
-        
-        # Process in batches to avoid rate limits
-        batch_size = 100
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            
+        for i in range(0, len(texts), self.EMBEDDING_BATCH_SIZE):
+            batch = texts[i:i + self.EMBEDDING_BATCH_SIZE]
             response = self.openai_client.embeddings.create(
                 model=self.settings.embedding_model,
                 input=batch
             )
-            
-            batch_embeddings = [item.embedding for item in response.data]
-            embeddings.extend(batch_embeddings)
-        
+            embeddings.extend([item.embedding for item in response.data])
         return embeddings
     
     def index_documents(self, documents: List[Document]):
@@ -111,39 +118,34 @@ class VectorStore:
         
         print(f"Generating embeddings for {len(documents)} documents...")
         
-        # Generate embeddings
         texts = [doc.content for doc in documents]
         embeddings = self.generate_embeddings(texts)
         
-        # Prepare vectors for upsert
-        vectors = []
-        for doc, embedding in zip(documents, embeddings):
-            # Enhanced metadata with quality score and chunk type
-            enhanced_metadata = {
-                **doc.metadata,
-                'content': doc.content  # Store content in metadata for retrieval
-            }
-            
-            # Add quality score and chunk type if available
-            if hasattr(doc, 'quality_score') and doc.quality_score is not None:
-                enhanced_metadata['quality_score'] = str(doc.quality_score)
-            
-            if hasattr(doc, 'chunk_type') and doc.chunk_type is not None:
-                enhanced_metadata['chunk_type'] = doc.chunk_type
-            
-            vectors.append({
+        vectors = [
+            {
                 'id': doc.chunk_id,
                 'values': embedding,
-                'metadata': enhanced_metadata
-            })
+                'metadata': self._build_metadata(doc)
+            }
+            for doc, embedding in zip(documents, embeddings)
+        ]
         
-        # Upsert to Pinecone in batches
-        batch_size = 100
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i + batch_size]
-            self.index.upsert(vectors=batch)
+        for i in range(0, len(vectors), self.VECTOR_BATCH_SIZE):
+            self.index.upsert(vectors=vectors[i:i + self.VECTOR_BATCH_SIZE])
         
         print(f"Successfully indexed {len(documents)} documents")
+    
+    def _build_metadata(self, doc: Document) -> Dict:
+        """Build metadata dictionary for a document."""
+        metadata = {**doc.metadata, 'content': doc.content}
+        
+        if hasattr(doc, 'quality_score') and doc.quality_score is not None:
+            metadata['quality_score'] = str(doc.quality_score)
+        
+        if hasattr(doc, 'chunk_type') and doc.chunk_type is not None:
+            metadata['chunk_type'] = doc.chunk_type
+        
+        return metadata
     
     def search(self, query: str, top_k: int = None) -> List[Dict]:
         """
@@ -159,49 +161,30 @@ class VectorStore:
         if not self.index:
             raise ValueError("Index not initialized. Call initialize_index() first.")
         
-        if top_k is None:
-            top_k = self.settings.top_k_results
-        
-        # Generate query embedding
+        top_k = top_k or self.settings.top_k_results
         query_embedding = self.generate_embeddings([query])[0]
         
-        # Search Pinecone
         results = self.index.query(
             vector=query_embedding,
             top_k=top_k,
             include_metadata=True
         )
         
-        # Format results with enhanced metadata
-        formatted_results = []
-        for match in results.matches:
-            formatted_results.append({
+        return [
+            {
                 'id': match.id,
                 'score': match.score,
                 'content': match.metadata.get('content', ''),
                 'metadata': {
-                    'title': match.metadata.get('title', ''),
-                    'url': match.metadata.get('url', ''),
-                    'article_id': match.metadata.get('article_id', ''),
-                    'chunk_index': match.metadata.get('chunk_index', ''),
-                    'chunk_type': match.metadata.get('chunk_type', 'general'),
-                    'topics': match.metadata.get('topics', ''),
-                    'difficulty': match.metadata.get('difficulty', 'beginner'),
-                    'quality_score': match.metadata.get('quality_score', '0.0'),
-                    'has_code': match.metadata.get('has_code', 'false'),
-                    'has_steps': match.metadata.get('has_steps', 'false')
+                    key: match.metadata.get(key, default)
+                    for key, default in self.METADATA_DEFAULTS.items()
                 }
-            })
-        
-        return formatted_results
+            }
+            for match in results.matches
+        ]
     
     def get_index_stats(self) -> Dict:
-        """
-        Get statistics about the current index.
-        
-        Returns:
-            Dictionary with index statistics
-        """
+        """Get statistics about the current index."""
         if not self.index:
             return {'error': 'Index not initialized'}
         
@@ -211,4 +194,3 @@ class VectorStore:
             'dimension': stats.dimension,
             'index_fullness': stats.index_fullness
         }
-

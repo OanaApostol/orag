@@ -73,7 +73,7 @@ User ← Response Generation (GPT-4o-mini) ← Prompt + Context ←┘
    
    # Optional (defaults provided)
    PINECONE_INDEX_NAME=typeform-help-center
-   EMBEDDING_MODEL=text-embedding-3-small
+   EMBEDDING_MODEL=text-embedding-3-large
    LLM_MODEL=gpt-4o-mini
    ```
 
@@ -166,32 +166,80 @@ The app only rebuilds when the Pinecone index is empty. To apply changes - tempo
 
 ### 2. Embedding Model
 
-**Choice:** OpenAI's `text-embedding-3-small`
+**Choice:** OpenAI's `text-embedding-3-large`
 
-**Reasoning:**
-- **Cost-effective:** 5x cheaper than ada-002
-- **High performance:** Strong semantic understanding
-- **Smaller dimension:** 1536 dimensions (vs 3072 for large model)
-- **Fast inference:** Lower latency for real-time applications
+**Reasoning**
 
-**Alternatives considered:**
-- `text-embedding-3-large`: Better accuracy but 2x cost and higher latency
-- Open-source models (e.g., `sentence-transformers`): Free but require self-hosting
+- **Domain-specific accuracy:** The Typeform Help Center contains specialised terminology and concepts that require high-dimensional semantic understanding.
+
+- **Similar questions, distinct meanings:** The larger model better distinguishes between similar words or phrases with different meanings (e.g., multiple questions in different languages on the same page).
+
+- **Technical content handling:** The 3072-dimensional representation captures nuanced differences in technical tutorials, API documentation, and integration guides.
+
+- **Validated through testing:** text-embedding-3-small delivered insufficient answer quality.
+
+- **Semantic chunking dependency:** The FAQ and semantic chunking strategies rely on high-quality embeddings for accurate chunk boundary detection.
+
+- **Customer support use case:** Prioritises answer accuracy and reliability over cost in production deployments.
+
+**Model Comparison:**
+- `text-embedding-3-small` (1536 dims): Lower cost but insufficient for technical Help Center content (tested and rejected)
+- `text-embedding-3-large` (3072 dims): Superior semantic precision justified by improved answer quality ✓ CHOSEN
 
 ### 3. Vector Database
 
 **Choice:** Pinecone
 
-**Reasoning:**
+**Advantages:**
 - **Managed service:** No infrastructure overhead
 - **Serverless tier:** Perfect for prototyping
 - **Fast queries:** Optimized for similarity search
 - **Metadata filtering:** Supports filtering by article, date, etc.
 - **Free tier sufficient:** 100K vectors for free
 
-**Alternatives considered:**
-- **Chroma/Weaviate:** Good for local development but require hosting
-- **PostgreSQL with pgvector:** Self-hosted, good for existing Postgres users
+**Indexing Process**
+Data Ingestion: HTML → BeautifulSoup → Clean text
+Content Detection: FAQ vs. step-by-step vs. tutorial
+Chunking: Different strategies per content type
+Quality Filtering: Remove chunks below 0.3 score
+Embedding: Convert to 3072-dim vectors
+Metadata Enrichment: Add topics, difficulty, etc.
+Pinecone Upload: Batch upsert with metadata
+
+**Search Process**
+```User Query
+    ↓
+[Classification] ← Is it Typeform-related? (LLM check)
+    ↓ (Yes)
+[Query Expansion] ← Generate 2-3 variations (LLM)
+    ↓
+[Dynamic Threshold] ← Set confidence threshold based on query type
+    ↓
+[Vector Embedding] ← Convert 3 queries to 3072-dim vectors
+    ↓
+[Pinecone Search] ← Find top-3 similar chunks for each variation
+    ↓
+[Deduplication] ← Remove duplicate chunks
+    ↓
+[Filtering] ← Keep only chunks above threshold
+    ↓
+[Context Building] ← Combine chunks into single context
+    ↓
+[LLM Generation] ← Generate response with dynamic temperature
+    ↓
+[Quality Scoring] ← Score response on multiple factors
+    ↓
+[Caching] ← Store for future identical queries
+    ↓
+Response to User```
+
+**Key Features**
+
+- **Semantic chunking** preserves content boundaries
+- **Query expansion** catches paraphrased questions
+- **Dynamic thresholds** adjust precision per query type
+- **Source attribution** with relevance scores
+- **Query caching** eliminates redundant searches
 
 ### 4. Language Model
 
@@ -204,9 +252,9 @@ The app only rebuilds when the Pinecone index is empty. To apply changes - tempo
 - **JSON mode support:** Structured outputs when needed
 
 **Dynamic Temperature Strategy:**
-- **Troubleshooting queries:** 0.1 (maximum accuracy for error resolution)
-- **Factual questions:** 0.2 (high accuracy for how-to and what-is questions)
-- **General questions:** 0.3 (balanced accuracy and natural conversation)
+- **Troubleshooting queries:** 0.2 (maximum accuracy for error resolution)
+- **Factual questions:** 0.3 (high accuracy for how-to and what-is questions)
+- **General questions:** 0.4 (balanced accuracy and natural conversation)
 
 **Prompt Design:**
 - System prompt establishes role and guidelines
@@ -216,11 +264,15 @@ The app only rebuilds when the Pinecone index is empty. To apply changes - tempo
 
 ### 5. Retrieval Configuration
 
-**Choice:** Top-3 results with 0.7 similarity threshold
+**Choice:** Top-3 results with dynamic similarity thresholds
 
 **Reasoning:**
 - **Top-3** provides enough context without overwhelming the LLM
-- **0.7 threshold** filters out low-quality matches
+- **Dynamic thresholds** (0.3-0.6) adjust based on query type for better recall/precision balance
+  - Troubleshooting queries: 0.2 temperature for high accuracy
+  - Specific questions (how/what/when/where): 0.4 similarity threshold
+  - General questions (can i/is it possible/does it): 0.3 similarity threshold
+  - Default: 0.5 similarity threshold
 - Fallback response when no good matches found
 - Tuned through testing with sample queries
 
@@ -229,7 +281,7 @@ The app only rebuilds when the Pinecone index is empty. To apply changes - tempo
 ### Quality Metrics
 
 1. **Retrieval Metrics**
-   - **Relevance Score:** Cosine similarity of retrieved chunks (target: >0.7)
+   - **Relevance Score:** Cosine similarity of retrieved chunks (target: >0.6 for specific questions, >0.4 for general)
    - **Coverage:** % of queries with at least one relevant result (target: >90%)
    - **Precision@3:** Are top-3 results relevant? (target: >80%)
 
@@ -316,27 +368,56 @@ For production deployment, implement:
 
 ## 🔧 Configuration
 
-All configuration is managed through environment variables:
+Configuration is managed through the `config.yaml` file:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | OpenAI API key | **Required** |
-| `PINECONE_API_KEY` | Pinecone API key | **Required** |
-| `PINECONE_ENVIRONMENT` | Pinecone environment | **Required** |
-| `PINECONE_INDEX_NAME` | Pinecone index name | `typeform-help-center` |
-| `EMBEDDING_MODEL` | OpenAI embedding model | `text-embedding-3-small` |
-| `EMBEDDING_DIMENSION` | Embedding dimensions | `1536` |
-| `LLM_MODEL` | OpenAI LLM model | `gpt-4o-mini` |
-| `LLM_TEMPERATURE` | LLM temperature | `0.3` |
-| `MAX_TOKENS` | Max tokens in response | `500` |
-| `TOP_K_RESULTS` | Number of chunks to retrieve | `3` |
-| `CHUNK_SIZE` | Chunk size in characters | `800` |
-| `CHUNK_OVERLAP` | Chunk overlap in characters | `200` |
-| `USE_SEMANTIC_CHUNKING` | Enable semantic chunking | `true` |
-| `SEMANTIC_THRESHOLD_PERCENTILE` | Semantic similarity threshold | `95` |
-| `MIN_CHUNK_QUALITY_SCORE` | Minimum chunk quality score | `0.3` |
-| `ENABLE_CONTENT_AWARE_CHUNKING` | Enable content-type detection | `true` |
-| `DYNAMIC_CHUNK_SIZING` | Enable dynamic chunk sizing | `true` |
+```yaml
+# Typeform RAG Chatbot Configuration
+
+openai:
+  api_key: "your_openai_api_key"
+
+pinecone:
+  api_key: "your_pinecone_api_key"
+
+embedding:
+  model: "text-embedding-3-large"
+  dimension: 3072
+
+llm:
+  model: "gpt-4o-mini"
+  temperature: 0.25
+  max_tokens: 500
+
+retrieval:
+  top_k_results: 3
+  chunk_size: 800
+  chunk_overlap: 200
+
+chunking:
+  use_semantic_chunking: true
+  semantic_threshold_percentile: 95
+  min_chunk_quality_score: 0.3
+  enable_content_aware_chunking: true
+  dynamic_chunk_sizing: true
+```
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `openai.api_key` | OpenAI API key | **Required** |
+| `pinecone.api_key` | Pinecone API key | **Required** |
+| `embedding.model` | OpenAI embedding model | `text-embedding-3-large` |
+| `embedding.dimension` | Embedding dimensions | `3072` |
+| `llm.model` | OpenAI LLM model | `gpt-4o-mini` |
+| `llm.temperature` | Base LLM temperature (overridden by query type) | `0.25` |
+| `llm.max_tokens` | Max tokens in response | `500` |
+| `retrieval.top_k_results` | Number of chunks to retrieve | `3` |
+| `retrieval.chunk_size` | Chunk size in characters | `800` |
+| `retrieval.chunk_overlap` | Chunk overlap in characters | `200` |
+| `chunking.use_semantic_chunking` | Enable semantic chunking | `true` |
+| `chunking.semantic_threshold_percentile` | Semantic similarity threshold | `95` |
+| `chunking.min_chunk_quality_score` | Minimum chunk quality score | `0.3` |
+| `chunking.enable_content_aware_chunking` | Enable content-type detection | `true` |
+| `chunking.dynamic_chunk_sizing` | Enable dynamic chunk sizing | `true` |
 
 ## 🧪 Testing
 

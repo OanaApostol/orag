@@ -7,6 +7,36 @@ from langchain_openai import OpenAIEmbeddings
 from app.config import get_settings
 
 
+# Module-level constants for content detection and processing
+CONTENT_PATTERNS = {
+    'steps': [r'step\s+\d+', r'^\d+\.', r'how to', r'follow these steps'],
+    'faq': [r'q:', r'q\)', r'question:', r'answer:', r'what (is|are)', r'why'],
+    'tutorial': [r'tutorial', r'guide', r'introduction', r'getting started'],
+}
+
+OVERLAP_PERCENTAGES = {
+    'steps': 0.15,
+    'faq': 0.2,
+    'tutorial': 0.25,
+    'default': 0.2,
+}
+
+TOPIC_PATTERNS = {
+    'integration': r'(integration|webhook|api|zapier)',
+    'form_design': r'(form design|field|question)',
+    'payment': r'(payment|stripe|billing|checkout)',
+    'collaboration': r'(collaboration|team|workspace|share)',
+    'reports': r'(report|analytics|result)',
+    'account': r'(account|profile|settings|password)',
+}
+
+STOP_WORDS = {
+    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 
+    'has', 'he', 'in', 'is', 'it', 'its', 'of', 'on', 'that', 'the', 
+    'to', 'was', 'will', 'with', 'you', 'your', 'i', 'me', 'this', 'or'
+}
+
+
 @dataclass
 class Document:
     """Represents a document chunk with metadata."""
@@ -29,9 +59,9 @@ class DataProcessor:
     - Rich metadata for better retrieval
     """
     
-    def __init__(self):
+    def __init__(self, settings=None):
         """Initialize the data processor with configuration."""
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
         
         # Initialize semantic chunker if enabled
         if self.settings.use_semantic_chunking:
@@ -72,46 +102,39 @@ class DataProcessor:
         """
         documents = []
         
-        # If no articles provided, load from HTML files
         if articles is None:
             articles = self._load_html_articles()
         
         for idx, article in enumerate(articles):
-            # Enhanced text cleaning
             cleaned_content = self._enhanced_text_cleaning(article['content'])
-            
-            # Determine optimal chunking strategy
-            chunking_strategy = self._determine_chunking_strategy(cleaned_content, article['title'])
+            chunking_strategy = self._detect_content_type(cleaned_content)
             
             # Create chunks using appropriate strategy
-            if chunking_strategy == 'semantic' and self.semantic_splitter:
+            if chunking_strategy == 'step_by_step':
+                chunks = self._chunk_step_by_step(cleaned_content)
+            elif chunking_strategy == 'faq':
+                chunks = self._chunk_faq_format(cleaned_content)
+            elif chunking_strategy == 'semantic' and self.semantic_splitter:
                 try:
                     chunks = self.semantic_splitter.split_text(cleaned_content)
                 except Exception as e:
                     print(f"Semantic chunking failed, falling back to recursive: {e}")
                     chunks = self._chunk_with_enhanced_recursive(cleaned_content)
-            elif chunking_strategy == 'step_by_step':
-                chunks = self._chunk_step_by_step(cleaned_content)
-            elif chunking_strategy == 'faq':
-                chunks = self._chunk_faq_format(cleaned_content)
             else:
                 chunks = self._chunk_with_enhanced_recursive(cleaned_content)
             
             # Create Document objects with enhanced metadata
             for chunk_idx, chunk in enumerate(chunks):
-                # Calculate chunk quality score
                 quality_score = self._calculate_chunk_quality(chunk)
                 
-                # Skip low-quality chunks if quality filtering is enabled
                 if quality_score < self.settings.min_chunk_quality_score:
                     continue
                 
-                # Classify chunk type
                 chunk_type = self._classify_chunk_type(chunk)
                 
                 doc = Document(
                     content=chunk,
-                    metadata=self._create_enhanced_metadata(chunk, article, chunk_idx, len(chunks)),
+                    metadata=self._create_enhanced_metadata(chunk, article, chunk_idx, len(chunks), quality_score),
                     chunk_id=f"article_{idx}_chunk_{chunk_idx}",
                     quality_score=quality_score,
                     chunk_type=chunk_type
@@ -154,36 +177,40 @@ class DataProcessor:
         
         return articles
     
-    def _determine_chunking_strategy(self, content: str, title: str) -> str:
-        """Determine the best chunking strategy for the content."""
-        
+    def _detect_content_type(self, content: str) -> str:
+        """Detect content type and return appropriate chunking strategy."""
         if not self.settings.enable_content_aware_chunking:
             return 'semantic' if self.semantic_splitter else 'recursive'
         
-        # Check for step-by-step guides
-        if self._is_step_by_step_guide(content):
+        if self._has_pattern(content, 'steps'):
             return 'step_by_step'
-        
-        # Check for FAQ format
-        if self._is_faq_format(content):
+        if self._has_pattern(content, 'faq'):
             return 'faq'
-        
-        # Check for tutorial content
-        if self._is_tutorial_content(content):
+        if self._has_pattern(content, 'tutorial'):
             return 'tutorial'
         
-        # Default to semantic chunking for complex content
+        # Default to semantic for complex content
         if len(content) > 2000 and self.semantic_splitter:
             return 'semantic'
         
         return 'recursive'
     
+    def _has_pattern(self, text: str, pattern_type: str) -> bool:
+        """Check if text matches patterns of given type."""
+        if pattern_type not in CONTENT_PATTERNS:
+            return False
+        
+        patterns = CONTENT_PATTERNS[pattern_type]
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE if pattern_type != 'steps' else 0):
+                return True
+        return False
+    
     def _chunk_with_enhanced_recursive(self, content: str) -> List[str]:
         """Enhanced recursive chunking with dynamic sizing."""
-        
         if self.settings.dynamic_chunk_sizing:
             optimal_size = self._calculate_optimal_chunk_size(content)
-            optimal_overlap = self._calculate_optimal_overlap(optimal_size, 'general')
+            optimal_overlap = int(optimal_size * OVERLAP_PERCENTAGES.get('tutorial', 0.25))
             
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=optimal_size,
@@ -197,7 +224,6 @@ class DataProcessor:
     
     def _chunk_step_by_step(self, content: str) -> List[str]:
         """Chunk step-by-step guides to preserve complete steps."""
-        # Split on numbered steps
         steps = re.split(r'\n(?=\d+\.)', content)
         chunks = []
         current_chunk = ""
@@ -217,59 +243,27 @@ class DataProcessor:
     
     def _chunk_faq_format(self, content: str) -> List[str]:
         """Chunk FAQ format to preserve question-answer pairs."""
-        # Split on question patterns
         qa_pairs = re.split(r'\n(?=[A-Z][^.!?]*\?)', content)
-        chunks = []
-        
-        for qa_pair in qa_pairs:
-            if qa_pair.strip():
-                chunks.append(qa_pair.strip())
-        
-        return chunks
+        return [qa.strip() for qa in qa_pairs if qa.strip()]
     
     def _calculate_optimal_chunk_size(self, content: str) -> int:
         """Calculate optimal chunk size based on content characteristics."""
-        
-        # Base chunk size
         base_size = self.settings.chunk_size
-        
-        # Adjust based on content density
         sentence_count = len(re.findall(r'[.!?]+', content))
         avg_sentence_length = len(content) / max(sentence_count, 1)
         
-        # Dense technical content needs smaller chunks
         if avg_sentence_length > 100:
             return int(base_size * 0.7)
-        
-        # Conversational content can use larger chunks
         elif avg_sentence_length < 50:
             return int(base_size * 1.2)
-        
         return base_size
-    
-    def _calculate_optimal_overlap(self, chunk_size: int, content_type: str) -> int:
-        """Calculate optimal overlap based on chunk size and content type."""
-        
-        # Base overlap percentage
-        base_overlap_pct = 0.25  # 25%
-        
-        # Adjust based on content type
-        if content_type == 'step_by_step':
-            return int(chunk_size * 0.15)  # Less overlap for steps
-        elif content_type == 'definition':
-            return int(chunk_size * 0.35)   # More overlap for definitions
-        elif content_type == 'tutorial':
-            return int(chunk_size * 0.20)   # Moderate overlap
-        
-        return int(chunk_size * base_overlap_pct)
     
     def _calculate_chunk_quality(self, chunk: str) -> float:
         """Calculate quality score for a chunk."""
         score = 0.0
         
         # Length appropriateness (0-0.3)
-        length_score = min(len(chunk) / self.settings.chunk_size, 1.0) * 0.3
-        score += length_score
+        score += min(len(chunk) / self.settings.chunk_size, 1.0) * 0.3
         
         # Completeness (0-0.3)
         if self._is_complete_sentence(chunk):
@@ -285,10 +279,8 @@ class DataProcessor:
         
         return min(score, 1.0)
     
-    def _create_enhanced_metadata(self, chunk: str, article: dict, chunk_idx: int, total_chunks: int) -> Dict[str, str]:
+    def _create_enhanced_metadata(self, chunk: str, article: dict, chunk_idx: int, total_chunks: int, quality_score: float) -> Dict[str, str]:
         """Create rich metadata for better retrieval."""
-        
-        # Extract key information from chunk
         chunk_type = self._classify_chunk_type(chunk)
         key_topics = self._extract_topics(chunk)
         difficulty_level = self._assess_difficulty(chunk)
@@ -304,9 +296,9 @@ class DataProcessor:
             'difficulty': difficulty_level,
             'word_count': str(len(chunk.split())),
             'char_count': str(len(chunk)),
-            'has_code': 'true' if self._contains_code(chunk) else 'false',
-            'has_steps': 'true' if self._contains_steps(chunk) else 'false',
-            'quality_score': str(self._calculate_chunk_quality(chunk))
+            'has_code': 'true' if self._has_pattern(chunk, 'code') else 'false',
+            'has_steps': 'true' if self._has_pattern(chunk, 'steps') else 'false',
+            'quality_score': str(quality_score)
         }
     
     def _classify_chunk_type(self, chunk: str) -> str:
@@ -327,26 +319,13 @@ class DataProcessor:
     def _extract_topics(self, chunk: str) -> List[str]:
         """Extract key topics from chunk."""
         topics = []
-        
-        # Common Typeform topics
-        topic_patterns = {
-            'forms': r'\b(form|typeform|survey|questionnaire)\b',
-            'logic': r'\b(logic|jump|conditional|branch)\b',
-            'design': r'\b(design|theme|styling|appearance)\b',
-            'integration': r'\b(integration|api|webhook|connect)\b',
-            'analytics': r'\b(analytics|report|data|statistics)\b',
-            'sharing': r'\b(share|embed|link|distribution)\b'
-        }
-        
-        for topic, pattern in topic_patterns.items():
+        for topic, pattern in TOPIC_PATTERNS.items():
             if re.search(pattern, chunk.lower()):
                 topics.append(topic)
-        
         return topics
     
     def _assess_difficulty(self, chunk: str) -> str:
         """Assess difficulty level of chunk."""
-        # Simple heuristic based on technical terms and sentence complexity
         technical_terms = len(re.findall(r'\b(api|webhook|integration|configuration|authentication)\b', chunk.lower()))
         avg_sentence_length = len(chunk.split()) / max(len(re.findall(r'[.!?]+', chunk)), 1)
         
@@ -357,42 +336,6 @@ class DataProcessor:
         else:
             return 'beginner'
     
-    def _contains_code(self, chunk: str) -> bool:
-        """Check if chunk contains code snippets."""
-        code_indicators = ['```', '`', 'code:', 'example:', 'curl', 'javascript', 'python']
-        return any(indicator in chunk.lower() for indicator in code_indicators)
-    
-    def _contains_steps(self, chunk: str) -> bool:
-        """Check if chunk contains step-by-step instructions."""
-        step_patterns = [r'\d+\.', r'step \d+', r'first,', r'next,', r'then,', r'finally,']
-        return any(re.search(pattern, chunk.lower()) for pattern in step_patterns)
-    
-    def _is_step_by_step_guide(self, content: str) -> bool:
-        """Detect if content is a step-by-step guide."""
-        step_patterns = [
-            r'\d+\.\s+[A-Z]',  # "1. Create..."
-            r'Step \d+:',      # "Step 1:"
-            r'First,|Next,|Finally,'
-        ]
-        return any(re.search(pattern, content) for pattern in step_patterns)
-    
-    def _is_faq_format(self, content: str) -> bool:
-        """Detect if content is in FAQ format."""
-        faq_patterns = [
-            r'\?\s*$',  # Ends with question mark
-            r'Q:\s*',   # Q: format
-            r'A:\s*'    # A: format
-        ]
-        return any(re.search(pattern, content) for pattern in faq_patterns)
-    
-    def _is_tutorial_content(self, content: str) -> bool:
-        """Detect if content is tutorial-style."""
-        tutorial_indicators = [
-            'tutorial', 'guide', 'how to', 'learn', 'getting started',
-            'introduction', 'overview', 'basics'
-        ]
-        return any(indicator in content.lower() for indicator in tutorial_indicators)
-    
     def _is_complete_sentence(self, chunk: str) -> bool:
         """Check if chunk contains complete sentences."""
         sentences = re.split(r'[.!?]+', chunk)
@@ -400,67 +343,37 @@ class DataProcessor:
     
     def _has_sufficient_context(self, chunk: str) -> bool:
         """Check if chunk has sufficient context."""
-        # Simple heuristic: chunk should have at least 2 sentences or be longer than 100 chars
         sentences = re.findall(r'[.!?]+', chunk)
         return len(sentences) >= 2 or len(chunk) > 100
     
     def _has_high_information_density(self, chunk: str) -> bool:
         """Check if chunk has high information density."""
-        # Count meaningful words (exclude common stop words)
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should'}
         words = chunk.lower().split()
-        meaningful_words = [w for w in words if w not in stop_words and len(w) > 2]
-        
+        meaningful_words = [w for w in words if w not in STOP_WORDS and len(w) > 2]
         return len(meaningful_words) / max(len(words), 1) > 0.6
     
     def _enhanced_text_cleaning(self, text: str) -> str:
-        """
-        Enhanced text cleaning that preserves structure.
-        
-        Args:
-            text: Raw text content
-        
-        Returns:
-            Cleaned text
-        """
-        # Preserve important formatting
-        text = re.sub(r'\n{3,}', '\n\n', text)  # Max 2 newlines
-        text = re.sub(r'[ \t]+', ' ', text)     # Normalize spaces
-        
-        # Preserve markdown-like formatting
-        text = re.sub(r'\*\*(.*?)\*\*', r'**\1**', text)  # Bold
-        text = re.sub(r'\*(.*?)\*', r'*\1*', text)        # Italic
-        
-        # Clean up special characters but preserve important ones
+        """Enhanced text cleaning that preserves structure."""
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\*\*(.*?)\*\*', r'**\1**', text)
+        text = re.sub(r'\*(.*?)\*', r'*\1*', text)
         text = re.sub(r'[^\w\s.,!?;:()\-\'\"\*\n]', '', text)
-        
-        # Preserve list formatting
         text = re.sub(r'^[\s]*[-*]\s+', '• ', text, flags=re.MULTILINE)
-        
         return text.strip()
     
     def get_stats(self, documents: List[Document]) -> Dict:
-        """
-        Get statistics about the processed documents.
-        
-        Args:
-            documents: List of Document objects
-        
-        Returns:
-            Dictionary with statistics
-        """
+        """Get statistics about the processed documents."""
         total_chunks = len(documents)
         avg_chunk_length = sum(len(doc.content) for doc in documents) / total_chunks if total_chunks > 0 else 0
         unique_articles = len(set(doc.metadata['article_id'] for doc in documents))
         
-        # Enhanced statistics
         chunk_types = {}
         quality_scores = []
         
         for doc in documents:
             chunk_type = doc.chunk_type or 'unknown'
             chunk_types[chunk_type] = chunk_types.get(chunk_type, 0) + 1
-            
             if doc.quality_score is not None:
                 quality_scores.append(doc.quality_score)
         

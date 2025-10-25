@@ -18,14 +18,15 @@ class RAGEngine:
     - Citation of sources in responses for transparency
     """
     
-    def __init__(self, vector_store: VectorStore):
+    def __init__(self, vector_store: VectorStore, settings=None):
         """
         Initialize RAG engine.
         
         Args:
             vector_store: VectorStore instance for retrieval
+            settings: Settings instance (optional)
         """
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
         self.vector_store = vector_store
         self.openai_client = OpenAI(api_key=self.settings.openai_api_key)
         self._query_cache = {}  # Cache for repeated queries
@@ -42,11 +43,11 @@ class RAGEngine:
         """
         # Troubleshooting gets very low temperature for maximum accuracy
         if any(word in query.lower() for word in ['error', 'problem', 'issue', 'fix', 'bug', 'broken', 'not working', 'troubleshoot']):
-            return 0.1
+            return 0.2
         
         # Factual questions get lower temperature for accuracy
         if any(word in query.lower() for word in ['how', 'what', 'when', 'where', 'why', 'which', 'can i', 'is it possible']):
-            return 0.2
+            return 0.3
         
         # General questions get moderate temperature (base setting)
         return self.settings.llm_temperature
@@ -65,7 +66,7 @@ class RAGEngine:
         
         # Specific questions need higher confidence
         if any(word in query_lower for word in ['how', 'what', 'when', 'where']):
-            return 0.6
+            return 0.45
         
         # General questions can use lower threshold
         if any(word in query_lower for word in ['can i', 'is it possible', 'does it']):
@@ -94,7 +95,7 @@ class RAGEngine:
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": classification_prompt}],
-                temperature=0.1,
+                temperature=0.3,
                 max_tokens=10
             )
             return response.choices[0].message.content.strip().upper() == "YES"
