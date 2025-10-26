@@ -40,11 +40,6 @@ ENV/
 .env
 .python-version
 
-# Package managers
-uv.lock
-poetry.lock
-Pipfile.lock
-
 # IDE
 .vscode/
 .idea/
