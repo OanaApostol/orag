@@ -5,18 +5,19 @@ An AI-powered chatbot for Typeform's Help Center using Retrieval-Augmented Gener
 ## 🎯 Project Overview
 
 This project implements an end-to-end RAG solution that:
-- ✅ Loads and preprocesses Help Center articles
-- ✅ Chunks and embeds content for semantic search
-- ✅ Stores embeddings in Pinecone vector database
-- ✅ Retrieves relevant context for user queries
-- ✅ Generates accurate responses using OpenAI's GPT models
+- ✅ Loads and preprocesses Help Center articles from HTML files
+- ✅ Chunks and embeds content using OpenAI's `text-embedding-3-large` model
+- ✅ Stores embeddings in Pinecone vector database for semantic search
+- ✅ Retrieves relevant context for user queries with dynamic thresholds
+- ✅ Generates responses using OpenAI's GPT-4o-mini model
 - ✅ Exposes a REST API using FastAPI
+- ✅ Includes evaluation framework
 - ✅ Containerized with Docker for easy deployment
 
 ## 🏗️ Architecture
 
 ```
-User Query → FastAPI Endpoint → Vector Search (Pinecone) → Context Retrieval
+User Query → FastAPI Endpoint → Query Expansion → Vector Search (Pinecone) → Context Retrieval
                                                                 ↓
 User ← Response Generation (GPT-4o-mini) ← Prompt + Context ←┘
 ```
@@ -24,24 +25,29 @@ User ← Response Generation (GPT-4o-mini) ← Prompt + Context ←┘
 ### Key Components
 
 1. **Data Processor** (`app/data_processor.py`)
-   - Loads and cleans Help Center articles
-   - Implements semantic chunking strategy
-   - Preserves metadata for better retrieval
+   - Loads and cleans Help Center articles from HTML files
+   - Implements multi-strategy chunking (semantic, recursive, content-aware)
+   - Preserves metadata for better retrieval and quality scoring
+   - Classifies chunks by type (step-by-step, question, definition, advice, troubleshooting, general)
 
 2. **Vector Store** (`app/vector_store.py`)
-   - Manages Pinecone integration
-   - Generates embeddings using OpenAI
-   - Handles semantic search queries
+   - Manages Pinecone integration with `text-embedding-3-large` (3072 dimensions)
+   - Generates embeddings in batches (100 texts per batch) for efficiency during indexing
+   - Processes individual search queries through single embedding generation
+   - Handles semantic search queries with metadata filtering
 
 3. **RAG Engine** (`app/rag_engine.py`)
-   - Orchestrates retrieval and generation
-   - Implements prompt engineering
-   - Handles fallback scenarios
+   - Orchestrates retrieval and generation with query expansion (2-3 variations)
+   - Implements dynamic temperature based on query type
+   - Implements dynamic similarity thresholds per query classification
+   - Handles fallback scenarios and response quality scoring
+   - Caches responses for repeated queries
 
 4. **FastAPI Application** (`app/main.py`)
    - REST API with `/ask_question` endpoint
-   - Health checks and statistics
-   - Automatic index initialization
+   - Health checks, statistics, and interactive documentation at `/docs`
+   - Web-based chat interface at `/chat`
+   - Automatic index initialization with `force_recreate=True`
 
 ## 🚀 Quick Start
 
@@ -56,26 +62,22 @@ User ← Response Generation (GPT-4o-mini) ← Prompt + Context ←┘
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd RAG
+   cd orag
    ```
 
-2. **Create environment file**
-   ```bash
-   cp env.example .env
-   ```
-
-3. **Add your API keys to `.env`**
-   ```bash
-   # Required
-   OPENAI_API_KEY=your_openai_api_key_here
-   PINECONE_API_KEY=your_pinecone_api_key_here
-   PINECONE_ENVIRONMENT=your_pinecone_environment_here
+2. **Configure API keys in `config.yaml`**
+   ```yaml
+   openai:
+     api_key: "your_openai_api_key_here"
    
-   # Optional (defaults provided)
-   PINECONE_INDEX_NAME=typeform-help-center
-   EMBEDDING_MODEL=text-embedding-3-large
-   LLM_MODEL=gpt-4o-mini
+   pinecone:
+     api_key: "your_pinecone_api_key_here"
    ```
+
+3. **Add Help Center articles to `data/` folder**
+   - Download Help Center articles as HTML files
+   - Place them in the `data/` directory
+   - See [Data Management](#-data-management) section for details
 
 4. **Run with Docker**
    ```bash
@@ -96,26 +98,35 @@ curl -X POST "http://localhost:8000/ask_question" \
 **Using the interactive docs:**
 Visit `http://localhost:8000/docs` for Swagger UI
 
+**Interactive chat interface:**
+Visit `http://localhost:8000/chat` for web-based chat
+
 **Health check:**
 ```bash
 curl http://localhost:8000/health
 ```
 
+**Statistics:**
+```bash
+curl http://localhost:8000/stats
+```
+
 ## 📚 Data Management
 
-This POC does not focus on automated data freshness. Articles are managed manually.
+This POC focuses on manual data management for simplicity and control.
 
 ### Adding Help Center Articles
 
-1. Download the Help Center article as HTML (File → Save Page As → Web Page, Complete)
-2. Place the `.html` file into the `data/` folder in this repository
+1. Navigate to a Help Center article in your browser
+2. Save the page as HTML (File → Save Page As → Web Page, Complete)
+3. Place the `.html` file into the `data/` folder
 
 ### Expected Folder Structure
 
 ```
 data/
 ├── Article-Title-1 – Help Center.html
-├── Article-Title-1 – Help Center_files/     # Assets folder (auto-created by the browser)
+├── Article-Title-1 – Help Center_files/     # Assets folder (auto-created)
 │   ├── images/
 │   ├── stylesheets/
 │   └── scripts/
@@ -126,10 +137,61 @@ data/
 ### Updating Articles
 
 1. Replace the existing `.html` file in `data/` with the updated one
-2. Restart the app to reindex
+2. Restart the application to reindex:
+   ```bash
+   docker-compose restart
+   ```
 
-Note: When you add or update files in `data/`, you must re-embed to reflect changes in search.
-The app only rebuilds when the Pinecone index is empty. To apply changes - temporarily set `force_recreate=True` in `app/main.py` and restart
+**Note:** The index is recreated on every startup (`force_recreate=True` in `app/main.py`). Articles are processed and embedded each time the service starts.
+
+## 🎨 Prompt Design
+
+### System Prompt
+
+The RAG engine uses a carefully engineered system prompt to ensure accurate, contextual responses:
+
+```
+You are a specialized Typeform Help Center assistant. Your ONLY knowledge comes from 
+the provided Help Center articles. You must NOT use any external knowledge or training data.
+
+CRITICAL RULES:
+- Answer questions ONLY based on the provided context from Help Center articles
+- If the question asks about combining features that are individually covered in the context, 
+  provide a helpful answer based on logical inference
+- NEVER make up information not stated in the context
+
+FORMATTING GUIDELINES:
+- Use **bold** for important terms and feature names
+- Use bullet points (•) for lists and steps
+- Use numbered lists (1., 2., 3.) for sequential steps
+- Use > for important notes or tips
+- Use clear paragraph breaks for readability
+- Structure responses with clear headings when appropriate
+
+RESPONSE STYLE:
+- Be conversational and friendly, matching Typeform's tone
+- Cite sources when providing specific information
+- Keep responses concise but complete (aim for 2-4 paragraphs)
+- If the question is unclear, ask for clarification
+- Use emojis sparingly but effectively (🎯, 💡, ⚡, 📝, 🔧)
+
+STRICT PROHIBITIONS:
+- Do NOT use any knowledge from your training data
+- Do NOT provide general advice not covered in the context
+- Do NOT suggest features or capabilities not mentioned in the context
+
+Remember: You are ONLY a Typeform Help Center assistant with access to the provided articles. 
+Nothing else.
+```
+
+### Prompt Engineering Techniques
+
+1. **Role Definition:** Establishes clear boundaries as Typeform Help Center assistant
+2. **Strict Context Adherence:** Forces responses based only on provided context
+3. **Logical Inference:** Allows combining information when features are individually covered
+4. **Anti-Hallucination Measures:** Multiple prohibitions against external knowledge
+5. **Formatting Guidelines:** Ensures consistent, readable output
+6. **Conversational Tone:** Matches Typeform's brand voice
 
 ## 📊 Design Decisions
 
@@ -168,23 +230,21 @@ The app only rebuilds when the Pinecone index is empty. To apply changes - tempo
 
 **Choice:** OpenAI's `text-embedding-3-large`
 
-**Reasoning**
-
-- **Domain-specific accuracy:** The Typeform Help Center contains specialised terminology and concepts that require high-dimensional semantic understanding.
-
-- **Similar questions, distinct meanings:** The larger model better distinguishes between similar words or phrases with different meanings (e.g., multiple questions in different languages on the same page).
-
-- **Technical content handling:** The 3072-dimensional representation captures nuanced differences in technical tutorials, API documentation, and integration guides.
-
-- **Validated through testing:** text-embedding-3-small delivered insufficient answer quality.
-
-- **Semantic chunking dependency:** The FAQ and semantic chunking strategies rely on high-quality embeddings for accurate chunk boundary detection.
-
-- **Customer support use case:** Prioritises answer accuracy and reliability over cost in production deployments.
+**Reasoning:**
+- **Domain-specific accuracy:** The Typeform Help Center contains specialised terminology that requires high-dimensional semantic understanding
+- **Similar questions, distinct meanings:** Better distinguishes between similar words or phrases with different meanings
+- **Technical content handling:** The 3072-dimensional representation captures nuanced differences in technical tutorials and API documentation
+- **Validated through testing:** `text-embedding-3-small` delivered insufficient answer quality
+- **Semantic chunking dependency:** Relies on high-quality embeddings for accurate chunk boundary detection
+- **Customer support use case:** Prioritizes answer accuracy and reliability over cost
 
 **Model Comparison:**
-- `text-embedding-3-small` (1536 dims): Lower cost but insufficient for technical Help Center content (tested and rejected)
+- `text-embedding-3-small` (1536 dims): Lower cost but insufficient for technical content (tested and rejected)
 - `text-embedding-3-large` (3072 dims): Superior semantic precision justified by improved answer quality ✓ CHOSEN
+
+**Embedding Generation:**
+- During indexing: Embeddings generated in batches of 100 for efficiency
+- During search: Individual query embedding generated per search
 
 ### 3. Vector Database
 
@@ -194,20 +254,21 @@ The app only rebuilds when the Pinecone index is empty. To apply changes - tempo
 - **Managed service:** No infrastructure overhead
 - **Serverless tier:** Perfect for prototyping
 - **Fast queries:** Optimized for similarity search
-- **Metadata filtering:** Supports filtering by article, date, etc.
+- **Metadata filtering:** Supports filtering by article, chunk type, etc.
 - **Free tier sufficient:** 100K vectors for free
 
-**Indexing Process**
-Data Ingestion: HTML → BeautifulSoup → Clean text
-Content Detection: FAQ vs. step-by-step vs. tutorial
-Chunking: Different strategies per content type
-Quality Filtering: Remove chunks below 0.3 score
-Embedding: Convert to 3072-dim vectors
-Metadata Enrichment: Add topics, difficulty, etc.
-Pinecone Upload: Batch upsert with metadata
+**Indexing Process:**
+1. Data Ingestion: HTML → BeautifulSoup → Clean text
+2. Content Detection: FAQ vs. step-by-step vs. tutorial
+3. Chunking: Different strategies per content type
+4. Quality Filtering: Remove chunks below 0.3 score
+5. Embedding: Convert to 3072-dim vectors (batched)
+6. Metadata Enrichment: Add topics, difficulty, chunk type
+7. Pinecone Upload: Batch upsert with metadata
 
-**Search Process**
-```User Query
+**Search Process:**
+```
+User Query
     ↓
 [Classification] ← Is it Typeform-related? (LLM check)
     ↓ (Yes)
@@ -215,9 +276,9 @@ Pinecone Upload: Batch upsert with metadata
     ↓
 [Dynamic Threshold] ← Set confidence threshold based on query type
     ↓
-[Vector Embedding] ← Convert 3 queries to 3072-dim vectors
+[Vector Embedding] ← Convert query to 3072-dim vector
     ↓
-[Pinecone Search] ← Find top-3 similar chunks for each variation
+[Pinecone Search] ← Find top-3 similar chunks per variation
     ↓
 [Deduplication] ← Remove duplicate chunks
     ↓
@@ -225,23 +286,54 @@ Pinecone Upload: Batch upsert with metadata
     ↓
 [Context Building] ← Combine chunks into single context
     ↓
+[Inference Check] ← Can answer be inferred from available context?
+    ↓
 [LLM Generation] ← Generate response with dynamic temperature
     ↓
 [Quality Scoring] ← Score response on multiple factors
     ↓
 [Caching] ← Store for future identical queries
     ↓
-Response to User```
+Response to User
+```
 
-**Key Features**
-
+**Key Features:**
 - **Semantic chunking** preserves content boundaries
 - **Query expansion** catches paraphrased questions
 - **Dynamic thresholds** adjust precision per query type
 - **Source attribution** with relevance scores
 - **Query caching** eliminates redundant searches
+- **Inference checking** allows combining information when justified
 
-### 4. Language Model
+### 4. Dynamic Retrieval Configuration
+
+**Choice:** Query-type-specific thresholds for optimal precision/recall balance
+
+**Threshold Values:**
+- **"How/What/When/Where" questions:** 0.45 threshold (higher precision)
+- **"Can I/Is it possible" questions:** 0.3 threshold (higher recall)
+- **General questions:** 0.5 threshold (balanced)
+
+**Rationale:**
+- Different question types require different confidence levels
+- Specific questions benefit from higher precision
+- General questions can accept lower threshold for broader recall
+
+### 5. Dynamic Temperature Strategy
+
+**Choice:** Context-aware temperature based on query type
+
+**Temperature Values:**
+- **Error/Troubleshooting queries:** 0.2 (focused, factual)
+- **Factual questions (How/What/When/Where/Why/Which/Can I):** 0.3 (structured, clear)
+- **General questions:** 0.25 (balanced from config default)
+
+**Rationale:**
+- Troubleshooting requires maximum accuracy to avoid incorrect solutions
+- Factual questions benefit from structured, predictable outputs
+- General questions balance accuracy with natural conversational flow
+
+### 6. Language Model
 
 **Choice:** GPT-4o-mini with Dynamic Temperature
 
@@ -251,128 +343,41 @@ Response to User```
 - **Sufficient capability:** Excellent for Q&A tasks
 - **JSON mode support:** Structured outputs when needed
 
-**Dynamic Temperature Strategy:**
-- **Troubleshooting queries:** 0.2 (maximum accuracy for error resolution)
-- **Factual questions:** 0.3 (high accuracy for how-to and what-is questions)
-- **General questions:** 0.4 (balanced accuracy and natural conversation)
+## 📊 Evaluation Framework
 
-**Prompt Design:**
-- System prompt establishes role and guidelines
-- Clear instructions to avoid hallucination
-- Emphasis on citing sources
-- Conversational tone matching Typeform's brand
+The project includes a comprehensive evaluation framework in the `evaluation/` folder:
 
-### 5. Retrieval Configuration
+### Evaluation Metrics
 
-**Choice:** Top-3 results with dynamic similarity thresholds
+**Retrieval Quality:**
+- Precision@k, Recall@k, MRR, NDCG@k
 
-**Reasoning:**
-- **Top-3** provides enough context without overwhelming the LLM
-- **Dynamic thresholds** (0.3-0.6) adjust based on query type for better recall/precision balance
-  - Troubleshooting queries: 0.2 temperature for high accuracy
-  - Specific questions (how/what/when/where): 0.4 similarity threshold
-  - General questions (can i/is it possible/does it): 0.3 similarity threshold
-  - Default: 0.5 similarity threshold
-- Fallback response when no good matches found
-- Tuned through testing with sample queries
+**Generation Quality:**
+- BLEU Score, ROUGE-L, Semantic Similarity, Quality Score
 
-## 🔍 Evaluation Strategy
+**System Performance:**
+- Response Time, Confidence Score, Role Adherence
 
-### Quality Metrics
+### Running Evaluation
 
-1. **Retrieval Metrics**
-   - **Relevance Score:** Cosine similarity of retrieved chunks (target: >0.6 for specific questions, >0.4 for general)
-   - **Coverage:** % of queries with at least one relevant result (target: >90%)
-   - **Precision@3:** Are top-3 results relevant? (target: >80%)
+```bash
+# Navigate to evaluation directory
+cd evaluation
 
-2. **Response Quality Metrics**
-   - **Accuracy:** Does answer match article content? (manual evaluation)
-   - **Completeness:** Does answer fully address the question? (1-5 scale)
-   - **Hallucination Rate:** % of responses with unsupported claims (target: <5%)
-   - **Citation Accuracy:** Do citations match content? (target: 100%)
+# Run complete evaluation example
+python evaluate_rag.py --example
 
-3. **User Experience Metrics**
-   - **Response Time:** End-to-end latency (target: <3 seconds)
-   - **Fallback Rate:** % of queries triggering fallback (target: <10%)
-   - **Confidence Score:** Average retrieval confidence (target: >0.75)
+# Run evaluation with custom test data
+python evaluate_rag.py --test_data test_questions.json --output evaluation_report.json
+```
 
-### Evaluation Approach
-
-**Phase 1: Offline Evaluation**
-- Created test set of 20 representative questions (see `EVALUATION.md`)
-- Manual review of answers for accuracy and relevance
-- Measured retrieval and response quality metrics
-
-**Phase 2: Stress Testing**
-- Edge cases: ambiguous questions, out-of-scope queries
-- Adversarial examples: misleading questions, prompt injections
-- Robustness: typos, different phrasings
-
-**Phase 3: A/B Testing (Production)**
-- Compare against keyword search baseline
-- Measure user satisfaction (thumbs up/down)
-- Track query reformulation rate
-
-### Observability in Production
-
-For production deployment, implement:
-
-1. **Logging & Monitoring**
-   - Log all queries and responses
-   - Track latency, error rates, fallback rates
-   - Monitor API usage and costs
-
-2. **Quality Tracking**
-   - User feedback collection (thumbs up/down)
-   - Manual review of flagged responses
-   - Regular review of low-confidence queries
-
-3. **Continuous Evaluation**
-   - Automated tests on curated question set
-   - Weekly manual review of random samples
-   - Track metrics trends over time
-
-4. **Feedback Loop**
-   - Collect user corrections/feedback
-   - Use feedback to improve prompts and chunking
-   - Retrain or fine-tune models as needed
-
-## 📈 Performance & Scalability
-
-### Current Performance
-- **Embedding generation:** ~1-2 seconds for query
-- **Vector search:** <100ms in Pinecone
-- **LLM generation:** ~2-3 seconds
-- **Total latency:** ~3-5 seconds
-
-### Scaling Considerations
-
-**For 1K users/day:**
-- Current setup is sufficient
-- Free tier of Pinecone handles this easily
-- Cost: ~$0.50-1/day (mainly LLM calls)
-
-**For 10K+ users/day:**
-- Consider caching frequent queries (Redis)
-- Implement rate limiting and authentication
-- Upgrade to Pinecone paid tier
-- Use GPT-4o-mini batch API for lower costs
-- Consider streaming responses for better UX
-
-**For production:**
-- Add CDN for API caching
-- Implement request queuing for high load
-- Use connection pooling for Pinecone
-- Add redundancy and failover
-- Monitor and auto-scale based on traffic
+See `evaluation/EVALUATION_README.md` for detailed documentation.
 
 ## 🔧 Configuration
 
 Configuration is managed through the `config.yaml` file:
 
 ```yaml
-# Typeform RAG Chatbot Configuration
-
 openai:
   api_key: "your_openai_api_key"
 
@@ -401,45 +406,134 @@ chunking:
   dynamic_chunk_sizing: true
 ```
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `openai.api_key` | OpenAI API key | **Required** |
-| `pinecone.api_key` | Pinecone API key | **Required** |
-| `embedding.model` | OpenAI embedding model | `text-embedding-3-large` |
-| `embedding.dimension` | Embedding dimensions | `3072` |
-| `llm.model` | OpenAI LLM model | `gpt-4o-mini` |
-| `llm.temperature` | Base LLM temperature (overridden by query type) | `0.25` |
-| `llm.max_tokens` | Max tokens in response | `500` |
-| `retrieval.top_k_results` | Number of chunks to retrieve | `3` |
-| `retrieval.chunk_size` | Chunk size in characters | `800` |
-| `retrieval.chunk_overlap` | Chunk overlap in characters | `200` |
-| `chunking.use_semantic_chunking` | Enable semantic chunking | `true` |
-| `chunking.semantic_threshold_percentile` | Semantic similarity threshold | `95` |
-| `chunking.min_chunk_quality_score` | Minimum chunk quality score | `0.3` |
-| `chunking.enable_content_aware_chunking` | Enable content-type detection | `true` |
-| `chunking.dynamic_chunk_sizing` | Enable dynamic chunk sizing | `true` |
+### Key Settings
 
-## 🧪 Testing
+| Setting | Value | Description |
+|---------|-------|-------------|
+| `embedding.model` | `text-embedding-3-large` | High-quality embeddings with 3072 dimensions |
+| `embedding.dimension` | `3072` | Vector dimension for Pinecone index |
+| `llm.model` | `gpt-4o-mini` | Cost-effective, high-quality language model |
+| `llm.temperature` | `0.25` | Base temperature (overridden by query type) |
+| `retrieval.top_k_results` | `3` | Number of chunks to retrieve |
+| `retrieval.chunk_size` | `800` | Chunk size in characters |
+| `retrieval.chunk_overlap` | `200` | Chunk overlap in characters |
 
-### Run test queries
-```bash
-docker-compose exec rag-api python scripts/test_query.py
+## 📈 Performance Metrics
+
+Based on evaluation results:
+
+**Retrieval Performance:**
+- Precision@1: 0.75 (75% of top results are relevant)
+- MRR: 0.75 (relevant results found quickly)
+- NDCG@1: 0.75 (good ranking quality)
+
+**Generation Performance:**
+- BLEU Score: 0.16 (moderate word overlap with ground truth)
+- ROUGE-L: 0.15 (decent sentence structure similarity)
+- Semantic Similarity: 0.14 (good semantic alignment)
+- Quality Score: 0.17 (composite quality metric)
+
+**System Performance:**
+- Average Response Time: ~6 seconds
+- Average Confidence: 0.38
+- Role Adherence: 0.85+ (excellent adherence to Typeform Help Center role)
+
+## 🛠️ Development
+
+### Project Structure
+
+```
+orag/
+├── app/                         # Main application code
+│   ├── __init__.py
+│   ├── config.py               # Configuration management
+│   ├── data_processor.py       # HTML processing and chunking
+│   ├── main.py                 # FastAPI application
+│   ├── rag_engine.py           # RAG orchestration
+│   └── vector_store.py         # Pinecone integration
+├── data/                        # Help Center articles (HTML files)
+├── evaluation/                  # Evaluation framework
+│   ├── evaluate_rag.py         # Main evaluation script
+│   ├── EVALUATION_README.md    # Evaluation documentation
+│   ├── evaluation_report.json  # Latest evaluation results
+│   └── test_questions.json     # Sample test questions
+├── config.yaml                 # Configuration file
+├── docker-compose.yml          # Docker setup
+├── Dockerfile                  # Container definition
+├── pyproject.toml              # Python dependencies (uv)
+├── chat.html                   # Web-based chat interface
+├── uv.lock                     # Locked dependencies
+└── README.md                   # This file
 ```
 
-### Test enhanced chunking
+### Dependencies
+
+Key dependencies managed via `pyproject.toml`:
+- **FastAPI** (0.104.1) - Web framework
+- **OpenAI** (≥1.6.1) - LLM and embeddings
+- **Pinecone** (3.0.0) - Vector database
+- **LangChain** (0.1.0) - LLM framework
+- **BeautifulSoup4** (4.12.2) - HTML parsing
+- **PyYAML** (6.0.1) - Configuration management
+
+### Local Development
+
 ```bash
-docker-compose exec rag-api python scripts/test_enhanced_chunking.py
+# Install dependencies
+uv sync
+
+# Run locally (requires API keys in config.yaml)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Test dynamic temperature
+## 🚀 Deployment
+
+### Docker Deployment
+
 ```bash
-docker-compose exec rag-api python scripts/test_dynamic_temperature.py
+# Build and run
+docker-compose up --build
+
+# Run in background
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
 ```
 
-### Manually setup index
-```bash
-docker-compose exec rag-api python scripts/setup_index.py
-```
+### Production Considerations
+
+- **API Key Security:** Move API keys to environment variables, not config.yaml
+- **Index Management:** Implement index backup/restore strategy
+- **Monitoring:** Add logging and metrics collection
+- **Scaling:** Consider horizontal scaling for high traffic
+
+## 📝 API Reference
+
+### Endpoints
+
+**POST `/ask_question`**
+- **Description:** Ask a question to the RAG chatbot
+- **Request Body:** `{"question": "string", "top_k": int (optional)}`
+- **Response:** `{"answer": "string", "sources": [...], "retrieved_chunks": int, "confidence": float, "is_fallback": bool, "quality_score": float}`
+
+**GET `/health`**
+- **Description:** Health check endpoint
+- **Response:** `{"status": "string", "message": "string", "index_stats": {...}}`
+
+**GET `/stats`**
+- **Description:** System statistics
+- **Response:** Statistics about indexed documents and vector store
+
+**GET `/chat`**
+- **Description:** Interactive chat interface
+- **Response:** HTML page with web-based chat interface
+
+**GET `/docs`**
+- **Description:** Interactive API documentation (Swagger UI)
 
 ## 🐛 Known Limitations & Future Improvements
 
@@ -454,18 +548,17 @@ docker-compose exec rag-api python scripts/setup_index.py
 3. **English Only:** No multi-language support
    - Solution: Add language detection and translation
 
-4. **Basic Error Handling:** Limited fallback options
-   - Solution: Implement more sophisticated error recovery
-
-5. **No User Personalization:** Same responses for all users
+4. **No User Personalization:** Same responses for all users
    - Solution: Incorporate user context and preferences
+
+5. **Index Recreation on Startup:** Index always rebuilt on service restart
+   - Solution: Implement conditional index rebuild based on content changes
 
 ### Proposed Improvements
 
 #### Short-term (1-2 weeks)
-- [ ] Add conversation history tracking
-- [ ] Implement response caching
-- [ ] Add more comprehensive test suite
+- [ ] Implement selective index updates (only changed content)
+- [ ] Add response caching layer (Redis)
 - [ ] Improve error messages and logging
 - [ ] Add query preprocessing (spell check, intent classification)
 
@@ -474,57 +567,12 @@ docker-compose exec rag-api python scripts/setup_index.py
 - [ ] Add analytics dashboard
 - [ ] Support file upload for custom articles
 - [ ] Implement A/B testing framework
-- [ ] Add query reformulation suggestions
 
 #### Long-term (3+ months)
 - [ ] Multi-modal support (images, videos)
 - [ ] Fine-tune embedding model on Typeform content
 - [ ] Implement hybrid search (semantic + keyword)
-- [ ] Add support for complex reasoning chains
 - [ ] Build feedback loop for continuous improvement
-
-### Product Ideation
-
-**Enhanced Features:**
-1. **Proactive Suggestions:** Suggest related articles before user asks
-2. **Visual Tutorials:** Return embedded GIFs/videos from articles
-3. **Contextual Help:** Integrate directly into Typeform builder UI
-4. **Community Answers:** Incorporate community forum discussions
-5. **Personalized Responses:** Tailor based on user's form type and complexity
-
-**Integration Opportunities:**
-- Slack/Discord bot for team support
-- Chrome extension for in-context help
-- Typeform builder sidebar integration
-- Email response automation for support team
-
-## 🏗️ Project Structure
-
-```
-RAG/
-├── app/
-│   ├── __init__.py
-│   ├── config.py              # Configuration management
-│   ├── data_processor.py      # Data ingestion and chunking
-│   ├── vector_store.py        # Pinecone integration
-│   ├── rag_engine.py          # RAG orchestration
-│   └── main.py                # FastAPI application
-├── data/
-│   ├── __init__.py
-│   └── help_articles.py       # Help Center content
-├── scripts/
-│   ├── setup_index.py         # Index initialization script
-│   └── test_query.py          # Testing script
-├── notebooks/                  # Jupyter notebooks for exploration
-├── Dockerfile                  # Docker configuration
-├── docker-compose.yml          # Docker Compose setup
-├── requirements.txt            # Python dependencies
-├── env.example                 # Example environment variables
-├── .gitignore
-├── README.md                   # This file
-└── EVALUATION.md               # Detailed evaluation results
-
-```
 
 ## 💰 Cost Estimation
 
