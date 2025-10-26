@@ -604,7 +604,7 @@ This project was created as a technical case study.
 
 ## 📧 Questions?
 
-For questions or clarifications, please reach out to the Typeform Data Science team.
+For questions or clarifications, please reach out to Oana :) 
 
 ---
 
