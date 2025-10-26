@@ -60,6 +60,7 @@ class VectorStore:
             print(f"Deleting existing index: {index_name}")
             self.pc.delete_index(index_name)
             time.sleep(self.INIT_WAIT_TIME)
+            existing_indexes = self._get_existing_indexes()
         
         if index_name not in existing_indexes:
             self._create_index(index_name)

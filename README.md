@@ -589,14 +589,6 @@ Based on typical usage:
 - Pinecone: Free (or $70 for paid tier if needed)
 - Infrastructure: Varies by hosting choice
 
-## 🤝 Contributing
-
-This is a prototype project. For production use, consider:
-- Adding authentication and rate limiting
-- Implementing comprehensive error handling
-- Adding extensive test coverage
-- Setting up CI/CD pipeline
-- Implementing monitoring and alerting
 
 ## 📝 License
 
@@ -608,5 +600,5 @@ For questions or clarifications, please reach out to Oana :)
 
 ---
 
-**Built with:** FastAPI, OpenAI, Pinecone, LangChain, Docker
+**Built with:** FastAPI, OpenAI, Pinecone, Docker
 
