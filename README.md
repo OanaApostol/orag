@@ -59,32 +59,60 @@ User ← Response Generation (GPT-4o-mini) ← Prompt + Context ←┘
 
 ### Setup
 
-1. **Clone the repository**
+1. **Create a directory for your configuration**
    ```bash
-   git clone <repository-url>
-   cd orag
+   mkdir orag-setup
+   cd orag-setup
    ```
 
-2. **Configure API keys in `config.yaml`**
+2. **Create `config.yaml` with your API keys**
    ```yaml
    openai:
      api_key: "your_openai_api_key_here"
    
    pinecone:
      api_key: "your_pinecone_api_key_here"
+   
+   embedding:
+     model: "text-embedding-3-large"
+     dimension: 3072
+   
+   llm:
+     model: "gpt-4o-mini"
+     temperature: 0.25
+     max_tokens: 500
+   
+   retrieval:
+     top_k_results: 3
+     chunk_size: 800
+     chunk_overlap: 200
+   
+   chunking:
+     use_semantic_chunking: true
+     semantic_threshold_percentile: 95
+     min_chunk_quality_score: 0.3
+     enable_content_aware_chunking: true
+     dynamic_chunk_sizing: true
    ```
 
-3. **Add Help Center articles to `data/` folder**
-   - Download Help Center articles as HTML files
-   - Place them in the `data/` directory
-   - See [Data Management](#-data-management) section for details
-
-4. **Run with Docker**
+3. **Pull and run the pre-built Docker image**
    ```bash
-   docker-compose up --build
+   # Pull the image from GitHub Container Registry
+   docker pull ghcr.io/oanaapostol/orag:latest
+   
+   # Run the container with your config
+   docker run -d \
+     --name orag-chatbot \
+     -p 8000:8000 \
+     -v $(pwd)/config.yaml:/app/config.yaml \
+     ghcr.io/oanaapostol/orag:latest
    ```
 
-The API will be available at `http://localhost:8000`
+4. **Access the application**
+   - API: `http://localhost:8000`
+   - Chat Interface: `http://localhost:8000/chat`
+   - API Docs: `http://localhost:8000/docs`
+   - Health Check: `http://localhost:8000/health`
 
 ### Testing the API
 
@@ -478,38 +506,59 @@ Key dependencies managed via `pyproject.toml`:
 
 ### Local Development
 
-```bash
-# Install dependencies
-uv sync
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/OanaApostol/orag.git
+   cd orag
+   ```
 
-# Run locally (requires API keys in config.yaml)
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+2. **Install dependencies using `uv`**
+   ```bash
+   uv sync
+   ```
 
-## 🚀 Deployment
+3. **Configure API keys in `config.yaml`**
+   Create a `config.yaml` file in the project root (see [Configuration](#-configuration) section for the full template)
 
-### Docker Deployment
+4. **Add Help Center articles to `data/` folder**
+   - The `data/` folder is not included in the repository (it's in `.gitignore`)
+   - Download or save Help Center articles as HTML files
+   - Place them in the `data/` directory
+   - See [Data Management](#-data-management) section for details
 
-```bash
-# Build and run
-docker-compose up --build
+5. **Run the application locally**
+   ```bash
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
 
-# Run in background
-docker-compose up -d
+6. **Access the application**
+   - API: `http://localhost:8000`
+   - Chat Interface: `http://localhost:8000/chat`
+   - Interactive API Docs: `http://localhost:8000/docs`
+   - Health Check: `http://localhost:8000/health`
 
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
-```
+**Note:** Articles from the `data/` folder will be loaded and indexed automatically on startup.
 
 ### Production Considerations
 
-- **API Key Security:** Move API keys to environment variables, not config.yaml
-- **Index Management:** Implement index backup/restore strategy
-- **Monitoring:** Add logging and metrics collection
-- **Scaling:** Consider horizontal scaling for high traffic
+**API Security**
+- Ensure the public FastAPI endpoint adheres to security best practices, including authentication, rate limiting, and input validation.
+**CI/CD Pipelines**
+- Implement an automated CI/CD pipeline for seamless deployments to production.
+- Deploy a dynamic, autoscaling containerized environment that adjusts to incoming request volume.
+- Integrate cost monitoring with alerts for threshold breaches.
+**Data Ingestion Process**
+- Design and document the initial data ingestion and processing workflow.
+- Automate ingestion for newly added pages in real time.
+- Develop an update mechanism to refresh data chunks when source pages change.
+** Optimizations**
+- Experiment with alternative LLMs, embedding models, and chunking strategies for improved retrieval quality.
+- Introduce a distributed caching layer to speed up responses for frequent queries.
+**Testing**
+- Collaborate with the support team to create realistic testing scenarios.
+- Conduct controlled A/B tests in production with a limited customer segment.
+**Index Management**
+- Implement a robust backup and restore strategy for index reliability and disaster recovery.
 
 ## 📝 API Reference
 
